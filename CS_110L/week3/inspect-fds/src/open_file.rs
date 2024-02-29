@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::collections::hash_map::DefaultHasher;
+
 use std::hash::{Hash, Hasher};
 #[allow(unused_imports)] // TODO: delete this line for Milestone 4
 use std::{fmt, fs};
@@ -103,7 +104,6 @@ impl OpenFile {
     /// This file takes the contents of /proc/{pid}/fdinfo/{fdnum} for some file descriptor and
     /// extracts the access mode for that open file using the "flags:" field contained in the
     /// fdinfo text. It returns None if the "flags" field couldn't be found.
-    #[allow(unused)] // TODO: delete this line for Milestone 4
     fn parse_access_mode(fdinfo: &str) -> Option<AccessMode> {
         // Regex::new will return an Error if there is a syntactical error in our regular
         // expression. We call unwrap() here because that indicates there's an obvious problem with
@@ -134,10 +134,23 @@ impl OpenFile {
     /// program and we don't need to do fine-grained error handling, so returning Option is a
     /// simple way to indicate that "hey, we weren't able to get the necessary information"
     /// without making a big deal of it.)
-    #[allow(unused)] // TODO: delete this line for Milestone 4
     pub fn from_fd(pid: usize, fd: usize) -> Option<OpenFile> {
-        // TODO: implement for Milestone 4
-        unimplemented!();
+        let path1 = format!("/proc/{}/fd/{}",pid,fd);
+        let entry = fs::read_link(&path1).ok()?;
+        // For getting a human-friendly name
+        let file_name = OpenFile::path_to_name(entry.to_str()?);
+
+        let path2 = format!("/proc/{}/fdinfo/{}",pid,fd);
+        let fdinfo = fs::read_to_string(path2).ok()?;
+        
+        let cursor = OpenFile::parse_cursor(&fdinfo)?;
+        let mode = OpenFile::parse_access_mode(&fdinfo)?;
+
+        Some(OpenFile{
+            name: file_name,
+            cursor: cursor,
+            access_mode: mode,
+        })
     }
 
     /// This function returns the OpenFile's name with ANSI escape codes included to colorize

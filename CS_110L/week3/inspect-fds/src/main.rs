@@ -14,6 +14,10 @@ fn main() {
     // TODO: Milestone 1: Get the target Process using psutils::get_target()
     if let Ok(Some(process)) = ps_utils::get_target(&target) {
         process.print();
+        let children = ps_utils::get_child_processes(process.pid).expect("FAILED TO GET LIST OF CHILD");
+        for child in children{
+            child.print()
+        } 
     } else {
         println!("{}",format!("Target \"{}\" did not match any running PIDs or executables",target));
         std::process::exit(1);
