@@ -3,17 +3,32 @@ use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
+use crate::dwarf_data::{DwarfData,Error as DwarfError};
+
 pub struct Debugger {
     target: String,
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
+    debug_data:DwarfData,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
         // TODO (milestone 3): initialize the DwarfData
+
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -25,6 +40,7 @@ impl Debugger {
             history_path,
             readline,
             inferior: None,
+            debug_data,
         }
     }
 
@@ -45,7 +61,7 @@ impl Debugger {
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
                         // self.inferior.as_mut().unwrap().run();
-                        self.Debugger_next();
+                        self.debugger_next();
                     } else {
                         println!("Error starting subprocess");
                     }
@@ -62,17 +78,20 @@ impl Debugger {
 
                 DebuggerCommand::Continue => {
                     if self.inferior.as_mut().unwrap().alive() {
-                        self.Debugger_next();
+                        self.debugger_next();
                     } else {
                         println!("Inferior process is not running");
                     }             
                 }
 
+                DebuggerCommand::Backtrace => {
+                    self.inferior.as_mut().unwrap().print_backtrace(&self.debug_data).expect("No trace");
+                }
             }
         }
     }
 
-    fn Debugger_next(&mut self) {
+    fn debugger_next(&mut self) {
         match self.inferior.as_mut().unwrap().continue_exec() {
             Ok(status) => match status{
                 Status::Stopped(signal, rip) => {
@@ -86,7 +105,7 @@ impl Debugger {
                 },
             },
             Err(e) => println!("Error starting subprocess : {}",e)
-        } 
+        }
     }
 
     fn kill_inferior(&mut self) {
