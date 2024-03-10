@@ -43,13 +43,6 @@ impl Inferior {
             command.pre_exec(child_traceme);   
         }
 
-        // match child_process.spawn() {
-        //     Ok(child_pro) => {
-        //         let inferior = Inferior { child:child_pro };
-        //         Some(inferior)
-        //     } 
-        //     Err(_) => None
-        // }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return None
@@ -62,19 +55,6 @@ impl Inferior {
                 Some(inferior),
             _ => None
         }
-
-        // match child_process.spawn() {
-        //     Ok(child_pro) => {
-        //         let inferior = Inferior { child:child_pro };
-        //         Some(inferior)
-        //     } 
-        //     Err(_) => None
-        // }
-        // println!(
-        //     "Inferior::new not implemented! target={}, args={:?}",
-        //     target, args
-        // );
-        // None
     }
 
     pub fn run(&mut self){
@@ -103,5 +83,17 @@ impl Inferior {
     pub fn continue_exec(&self) -> Result<Status, nix::Error> {
         ptrace::cont(self.pid(), None)?;
         self.wait(None)
+    }
+
+    pub fn kill(&mut self) -> Result<(),std::io::Error>{
+        println!("Killing running inferior (pid {})", self.pid());              
+        self.child.kill()
+    }
+
+    pub fn alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true,
+            _ => false
+        }
     }
 }

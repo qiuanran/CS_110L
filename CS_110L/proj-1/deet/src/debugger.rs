@@ -32,38 +32,68 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
+                    if let Some(inferior) = self.inferior.as_mut() {
+                        if inferior.alive() {
+                            self.kill_inferior();
+                        }
+                    }
+
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
-                        match self.inferior.as_mut().unwrap().continue_exec() {
-                            Ok(status) => match status{
-                                Status::Stopped(signal, rip) => {
-                                    println!("Child stopped at current instruction pointer {:#x} due to signal {}", rip, signal)
-                                },
-                                Status::Signaled(signal) => {
-                                    println!("Child exited with signal {:?}", signal);
-                                },
-                                Status::Exited(exited) => {
-                                    println!("Child exited (status {})", exited);
-                                },
-                            },
-                            Err(e) => println!("Error starting subprocess : {}",e)
-                        } 
+                        // self.inferior.as_mut().unwrap().run();
+                        self.Debugger_next();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
 
-
                 DebuggerCommand::Quit => {
+                    if let Some(inferior) = self.inferior.as_mut() {
+                        if inferior.alive() {
+                            self.kill_inferior();
+                        }
+                    }
                     return;
+                }
+
+                DebuggerCommand::Continue => {
+                    if self.inferior.as_mut().unwrap().alive() {
+                        self.Debugger_next();
+                    } else {
+                        println!("Inferior process is not running");
+                    }             
                 }
 
             }
         }
+    }
+
+    fn Debugger_next(&mut self) {
+        match self.inferior.as_mut().unwrap().continue_exec() {
+            Ok(status) => match status{
+                Status::Stopped(signal, rip) => {
+                    println!("Child stopped at current instruction pointer {:#x} due to signal {}", rip, signal)
+                },
+                Status::Signaled(signal) => {
+                    println!("Child exited with signal {:?}", signal);
+                },
+                Status::Exited(exited) => {
+                    println!("Child exited (status {})", exited);
+                },
+            },
+            Err(e) => println!("Error starting subprocess : {}",e)
+        } 
+    }
+
+    fn kill_inferior(&mut self) {
+        match self.inferior.as_mut().unwrap().kill() {
+            Ok(_) => {self.inferior = None},
+            Err(e) => println!("Error killing subprocess : {}",e)
+        } 
     }
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
