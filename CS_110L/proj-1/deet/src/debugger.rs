@@ -11,6 +11,7 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data:DwarfData,
+    breakpoints:Vec<usize>,
 }
 
 impl Debugger {
@@ -30,10 +31,13 @@ impl Debugger {
             }
         };
 
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
+
+        debug_data.print();
 
         Debugger {
             target: target.to_string(),
@@ -41,6 +45,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
+            breakpoints:vec![],
         }
     }
 
@@ -54,7 +59,7 @@ impl Debugger {
                         }
                     }
 
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args,&self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
@@ -86,6 +91,12 @@ impl Debugger {
 
                 DebuggerCommand::Backtrace => {
                     self.inferior.as_mut().unwrap().print_backtrace(&self.debug_data).expect("No trace");
+                }
+
+                DebuggerCommand::Breakpoint(point) => {
+                    let location = parse_address(point.as_str()).unwrap();
+                    println!("Set breakpoint {} at {}",self.breakpoints.len(),point);
+                    self.breakpoints.push(location);
                 }
             }
         }
@@ -158,4 +169,15 @@ impl Debugger {
             }
         }
     }
+
+
+}
+
+fn parse_address(addr: &str) -> Option<usize> {
+    let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
+        &addr[2..]
+    } else {
+        &addr
+    };
+    usize::from_str_radix(addr_without_0x, 16).ok()
 }
