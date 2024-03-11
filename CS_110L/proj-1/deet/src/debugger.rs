@@ -95,7 +95,10 @@ impl Debugger {
         match self.inferior.as_mut().unwrap().continue_exec() {
             Ok(status) => match status{
                 Status::Stopped(signal, rip) => {
-                    println!("Child stopped at current instruction pointer {:#x} due to signal {}", rip, signal)
+                    println!("Child stopped ({})",signal);
+                    // milestone 4 : print stopped location
+                    let location = self.debug_data.get_line_from_addr(rip).unwrap();
+                    println!("Stopped at {}",location);
                 },
                 Status::Signaled(signal) => {
                     println!("Child exited with signal {:?}", signal);
