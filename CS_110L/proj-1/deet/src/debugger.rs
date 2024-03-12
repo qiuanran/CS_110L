@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic::Location;
 
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::{Inferior, Status};
@@ -21,6 +22,15 @@ pub struct Debugger {
 pub struct Breakpoint {
     pub addr: usize,
     pub orig_byte: u8,
+}
+
+// there are two ways to set breakpoints
+// 1. set breakpoint at the line number or func name
+// 2. set breakpoint at the raw address
+pub enum Point {
+    Line(usize),
+    Func(String),
+    Addr(usize), 
 }
 
 impl Debugger {
@@ -102,8 +112,20 @@ impl Debugger {
                 }
 
                 DebuggerCommand::Breakpoint(point) => {
-                    let location = parse_address(point.as_str()).unwrap();
-                    println!("Set breakpoint {} at {}",self.breakpoints.len(),point);
+                    let mut location:usize = 0;                    
+                    match type_breakpoint(point.as_str()) {
+                        Point::Line(line) => {
+                            location = self.debug_data.get_addr_for_line(None, line).unwrap();
+                        },
+                        Point::Func(func) => {
+                            location = self.debug_data.get_addr_for_function(None, func.as_str()).unwrap();
+                        },
+                        Point::Addr(addr) => {
+                            location = addr;
+                        }
+                    }
+
+                    println!("Set breakpoint {} at {}",self.breakpoints.len(),location);
                     
                     if let Some(inferior) = self.inferior.as_mut() {
                         if inferior.alive() {
@@ -207,3 +229,17 @@ fn parse_address(addr: &str) -> Option<usize> {
     };
     usize::from_str_radix(addr_without_0x, 16).ok()
 }
+
+fn type_breakpoint(point: &str) -> Point {
+    // if the point starts with *, it is a raw address
+    if point.starts_with("*"){
+        Point::Addr(parse_address(&point[1..]).unwrap())
+    }   // if the point is a number, it is a line number 
+    else if point.parse::<usize>().is_ok() {
+        Point::Line(point.parse().unwrap())
+    }   // otherwise, it is a function name
+    else {
+        Point::Func(point.to_string())
+    } 
+}
+                     
