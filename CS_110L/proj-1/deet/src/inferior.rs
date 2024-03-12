@@ -2,12 +2,15 @@ use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::collections::HashMap;
 use std::process::Child;
 use std::os::unix::process::CommandExt;
 
 use crate::dwarf_data::DwarfData;
 
 use std::mem::size_of;
+
+use crate::debugger::Breakpoint;
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -38,7 +41,7 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<usize>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &mut HashMap<usize,Breakpoint>) -> Option<Inferior> {
         // TODO: implement me!
 
         let mut command = std::process::Command::new(target);
@@ -56,9 +59,18 @@ impl Inferior {
 
         match waitpid(Pid::from_raw(inferior.child.id() as i32), None) {
             Ok(WaitStatus::Stopped(_, nix::sys::signal::SIGTRAP)) =>  {
-                for breakpoint in breakpoints {
-                    inferior.write_byte(*breakpoint, 0xcc).ok();
-                } 
+                // store the origal byte and replace it with 0xcc
+                for (addr, breakpoint) in breakpoints {
+                    match inferior.write_byte(*addr, 0xcc) {
+                        Ok(orig_byte) => {
+                            *breakpoint = Breakpoint {
+                                addr: *addr,
+                                orig_byte,
+                            };
+                        }
+                        Err(_) => println!("Inferior::new can't write_byte {}", addr),
+                    }
+                }
                 Some(inferior)
             }
             _ => None
@@ -88,7 +100,34 @@ impl Inferior {
         })
     }
 
-    pub fn continue_exec(&self) -> Result<Status, nix::Error> {
+    pub fn continue_exec(&mut self,breakpoints:&mut HashMap<usize,Breakpoint>) -> Result<Status, nix::Error> {
+        // // if the execution is stopped by a breakpoint, restore the original byte
+        if let Some(rip) = self.get_rip() {
+            if self.check_at_breakpoint(rip - 1, breakpoints) {
+                println!("Stopped at breakpoint");
+                let breakpoint = breakpoints.get(&(rip - 1)).unwrap();
+                let orig_byte = breakpoint.orig_byte;
+
+                self.write_byte(rip - 1, orig_byte).ok();
+
+                self.set_rip(rip - 1); 
+
+                ptrace::step(self.pid(), None)?;
+
+                match self.wait(None).unwrap() {
+                    Status::Stopped(_, _) => {
+                        self.write_byte(rip - 1, 0xcc).unwrap();
+                    },
+                    Status::Exited(signal) => {
+                        return Ok(Status::Exited(signal));
+                    },
+                    Status::Signaled(signal) => {
+                        return Ok(Status::Signaled(signal));
+                    },
+                }
+            }   
+        }
+
         ptrace::cont(self.pid(), None)?;
         self.wait(None)
     }
@@ -130,22 +169,40 @@ impl Inferior {
         Ok(())
     }
 
-    fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
+    pub fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
         let aligned_addr = align_addr_to_word(addr);
         let byte_offset = addr - aligned_addr;
         let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
         let orig_byte = (word >> 8 * byte_offset) & 0xff;
         let masked_word = word & !(0xff << 8 * byte_offset);
         let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
-        ptrace::write(
+        unsafe{
+            ptrace::write(
             self.pid(),
-            aligned_addr as ptrace::AddressType,
-            updated_word as *mut std::ffi::c_void,
-        )?;
+                aligned_addr as ptrace::AddressType,
+                updated_word as *mut std::ffi::c_void,
+            )?;
+        }
         Ok(orig_byte as u8)
     }
-    
 
+   pub fn get_rip(&self) -> Option<usize> {
+        let regs = ptrace::getregs(self.pid()).unwrap();
+        Some(regs.rip as usize)
+    }
+
+    pub fn set_rip(&self, rip: usize) {
+        let mut regs = ptrace::getregs(self.pid()).unwrap();
+        regs.rip = rip as u64;
+        ptrace::setregs(self.pid(), regs).unwrap();
+    } 
+
+    pub fn check_at_breakpoint(&self, rip: usize, breakpoints: &HashMap<usize, Breakpoint>) -> bool {
+        if let Some(breakpoint) = breakpoints.get(&rip) {
+            return true;
+        }
+        false
+    }
 }
 
 fn align_addr_to_word(addr: usize) -> usize {

@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
 use rustyline::Editor;
 
 use crate::dwarf_data::{DwarfData,Error as DwarfError};
@@ -8,17 +11,22 @@ use crate::dwarf_data::{DwarfData,Error as DwarfError};
 pub struct Debugger {
     target: String,
     history_path: String,
-    readline: Editor<()>,
+    readline: Editor<(),FileHistory>,
     inferior: Option<Inferior>,
     debug_data:DwarfData,
-    breakpoints:Vec<usize>,
+    breakpoints:HashMap<usize,Breakpoint>,
+}
+
+#[derive(Clone)]
+pub struct Breakpoint {
+    pub addr: usize,
+    pub orig_byte: u8,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
-        // TODO (milestone 3): initialize the DwarfData
-
+        // Load the target executable file to initialize the DwarfData
         let debug_data = match DwarfData::from_file(target) {
             Ok(val) => val,
             Err(DwarfError::ErrorOpeningFile) => {
@@ -31,13 +39,13 @@ impl Debugger {
             }
         };
 
+        //print the debug info,show the file and line number
+        debug_data.print();
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
-        let mut readline = Editor::<()>::new();
+        let mut readline = Editor::<(), FileHistory>::new().expect("Create Editor fail");
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
-
-        debug_data.print();
 
         Debugger {
             target: target.to_string(),
@@ -45,7 +53,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
-            breakpoints:vec![],
+            breakpoints: HashMap::new(),
         }
     }
 
@@ -59,7 +67,7 @@ impl Debugger {
                         }
                     }
 
-                    if let Some(inferior) = Inferior::new(&self.target, &args,&self.breakpoints) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args,&mut self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
@@ -96,14 +104,33 @@ impl Debugger {
                 DebuggerCommand::Breakpoint(point) => {
                     let location = parse_address(point.as_str()).unwrap();
                     println!("Set breakpoint {} at {}",self.breakpoints.len(),point);
-                    self.breakpoints.push(location);
+                    
+                    if let Some(inferior) = self.inferior.as_mut() {
+                        if inferior.alive() {
+                            match inferior.write_byte(location, 0xcc) {
+                                Ok(orignal_byte) => {
+                                    self.breakpoints.insert(
+                                        location, 
+                                        Breakpoint{addr:location, orig_byte:orignal_byte});
+                                },
+                                Err(e) => {
+                                    println!("Error setting breakpoint : {}",e);
+                                }
+                            }
+                        }
+                    } else {
+                        self.breakpoints.insert(
+                            location,
+                            Breakpoint{addr:location,orig_byte:0}
+                        );
+                    }
                 }
             }
         }
     }
 
     fn debugger_next(&mut self) {
-        match self.inferior.as_mut().unwrap().continue_exec() {
+        match self.inferior.as_mut().unwrap().continue_exec(&mut self.breakpoints) {
             Ok(status) => match status{
                 Status::Stopped(signal, rip) => {
                     println!("Child stopped ({})",signal);
@@ -169,7 +196,6 @@ impl Debugger {
             }
         }
     }
-
 
 }
 
