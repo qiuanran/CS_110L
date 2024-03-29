@@ -85,18 +85,49 @@ fn main() {
         }
     }
 }
-
+// 可以考虑优化随机算法，如 Fisher-Yates
+// 故障转移 + 选择
 fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let upstream_idx = rng.gen_range(0..state.upstream_addresses.len());
-    let upstream_ip = &state.upstream_addresses[upstream_idx];
-    TcpStream::connect(upstream_ip).or_else(|err| {
-        log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-        Err(err)
-    })
-    // TODO: implement failover (milestone 3)
+    let mut active_upstreams = state
+        .upstream_addresses
+        .iter()
+        .enumerate()
+        .collect::<Vec<_>>();
+
+    let mut count = 0;
+    let lenth = state.upstream_addresses.len();
+    loop {
+        // 使用随机数随机化尝试顺序
+        let idx = rng.gen_range(0..lenth - count);
+        active_upstreams.swap(idx, lenth - count - 1);
+        let upstream_ip = &state.upstream_addresses[idx];
+        // println!("{:?}",active_upstreams);
+        match TcpStream::connect(upstream_ip){
+            Ok(stream) => {
+                return Ok(stream);
+            }
+            Err(err) => {
+                log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
+                if count >= lenth {
+                    return Err(err);
+                }
+            }
+        }
+        count += 1;
+    }
 }
 
+// fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
+//     let mut rng = rand::rngs::StdRng::from_entropy();
+//     let upstream_idx = rng.gen_range(0..state.upstream_addresses.len());
+//     let upstream_ip = &state.upstream_addresses[upstream_idx];
+//     TcpStream::connect(upstream_ip).or_else(|err| {
+//         log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
+//         Err(err)
+//     })
+//     // TODO: implement failover (milestone 3)
+// }
 fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!(
