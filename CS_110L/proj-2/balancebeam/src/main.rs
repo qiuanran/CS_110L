@@ -98,11 +98,9 @@ fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> 
     let mut count = 0;
     let lenth = state.upstream_addresses.len();
     loop {
-        // 使用随机数随机化尝试顺序
         let idx = rng.gen_range(0..lenth - count);
+        let upstream_ip = active_upstreams[idx].1;
         active_upstreams.swap(idx, lenth - count - 1);
-        let upstream_ip = &state.upstream_addresses[idx];
-        // println!("{:?}",active_upstreams);
         match TcpStream::connect(upstream_ip){
             Ok(stream) => {
                 return Ok(stream);
