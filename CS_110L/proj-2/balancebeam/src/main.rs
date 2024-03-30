@@ -2,9 +2,11 @@ mod request;
 mod response;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use rand::{Rng, SeedableRng};
+use tokio::time::sleep;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
@@ -86,6 +88,11 @@ async fn main() {
         max_requests_per_minute: options.max_requests_per_minute,
         active_upstream:Arc::new(RwLock::new(options.upstream.clone())),
     };
+
+    let state_healthcheck = state.clone();
+    tokio::spawn(async move {
+        active_health_check(&state_healthcheck).await;
+    });
 
     while let Ok((stream,_)) = listener.accept().await {
         // Handle the connection!
@@ -224,3 +231,95 @@ async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
         log::debug!("Forwarded response to client");
     }
 }
+
+#[allow(while_true)]
+async fn active_health_check(state: &ProxyState){
+    while true {
+        // if this sleep is down the while, cannot pass the test
+        sleep(Duration::from_secs(
+            state.active_health_check_interval.try_into().unwrap(),
+        ))
+        .await;
+        let stream_address = &state.upstream_addresses;
+        let mut active_upstream_writer = state.active_upstream.write().await;
+        active_upstream_writer.clear();
+        for upstream_ip in stream_address {
+            let request = http::Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&state.active_health_check_path)
+                    .header("Host", upstream_ip)
+                    .body(Vec::new())
+                    .unwrap();
+
+            match TcpStream::connect(upstream_ip).await{
+                Ok(mut upstream_conn) => {
+                    if let Err(error) = request::write_to_stream(&request, &mut upstream_conn).await{ 
+                        log::error!(
+                            "Failed to send request to upstream {}: {}",
+                            upstream_ip,
+                            error
+                        ); 
+                        return;
+                    }
+                    let response = match response::read_from_stream(&mut upstream_conn, &request.method()).await {
+                        //if OK, update this stream to active stream
+                        Ok(response) => 
+                            response,
+                        Err(error) => {
+                            log::error!("Error reading response from server: {:?}", error);
+                            return;
+                        }
+                    };
+                    match response.status().as_u16(){
+                        200 => {
+                            // add_active_stream(&upstream_ip, state).await;
+                            // let active_stream_reader = state.active_upstream.read().await;
+                            // if active_stream_reader.contains(&upstream_ip){
+                            //     return;
+                            // }
+                            // drop(active_stream_reader);
+                            active_upstream_writer.push(upstream_ip.clone());
+                        }
+                        status @ _ => {
+                            log::error!(
+                                "upstream server {} is not working: {}",
+                                upstream_ip,
+                                status
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // delete_unactive_stream(&upstream_ip, state).await;
+                    return;
+                }
+            }
+
+        }
+        
+    }
+}
+
+// async fn delete_unactive_stream(stream_ip: &String,state: &ProxyState) {
+//     // check if this stream is in active stream
+//     let active_stream_reader = state.active_upstream.read().await;
+//     if !active_stream_reader.contains(&stream_ip){
+//         return;
+//     }
+
+//     let mut active_stream_writer = state.active_upstream.write().await;
+//     let idx = active_stream_writer.iter().position(|x| x == stream_ip).unwrap();
+//     active_stream_writer.swap_remove(idx);
+// }
+
+// async fn add_active_stream(stream_ip: &String,state: &ProxyState) {
+//     //first check if this stream is already in active stream
+//     let active_stream_reader = state.active_upstream.read().await;
+//     if active_stream_reader.contains(&stream_ip){
+//         return;
+//     }
+//     drop(active_stream_reader);
+//     let mut active_stream_writer = state.active_upstream.write().await;
+//     active_stream_writer.push(stream_ip.clone());
+// }
