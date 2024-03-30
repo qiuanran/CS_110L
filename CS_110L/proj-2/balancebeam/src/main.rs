@@ -1,13 +1,16 @@
 mod request;
 mod response;
 
+use std::sync::Arc;
+
 use clap::Parser;
 use rand::{Rng, SeedableRng};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(about = "Fun with load balancing")]
 struct CmdOptions {
     /// "IP/port to bind to"
@@ -44,6 +47,8 @@ struct ProxyState {
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
+    /// Active upstream that can be connected
+    active_upstream:Arc<RwLock<Vec<String>>>
 }
 
 #[tokio::main]
@@ -75,10 +80,11 @@ async fn main() {
 
     // Handle incoming connections
     let state = ProxyState {
-        upstream_addresses: options.upstream,
+        upstream_addresses: options.upstream.clone(),
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
+        active_upstream:Arc::new(RwLock::new(options.upstream.clone())),
     };
 
     while let Ok((stream,_)) = listener.accept().await {
@@ -89,34 +95,34 @@ async fn main() {
         });
     }
 }
+
 // 可以考虑优化随机算法，如 Fisher-Yates
 // 故障转移 + 选择
 async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let mut active_upstreams = state
-        .upstream_addresses
-        .iter()
-        .enumerate()
-        .collect::<Vec<_>>();
-
-    let mut count = 0;
-    let lenth = state.upstream_addresses.len();
     loop {
-        let idx = rng.gen_range(0..lenth - count);
-        let upstream_ip = active_upstreams[idx].1;
-        active_upstreams.swap(idx, lenth - count - 1);
+        let active_stream_reader = state.active_upstream.read().await;
+        let idx = rng.gen_range(0..active_stream_reader.len());
+        let upstream_ip = &active_stream_reader.get(idx).unwrap().clone();
+        drop(active_stream_reader);
+
         match TcpStream::connect(upstream_ip).await {
             Ok(stream) => {
                 return Ok(stream);
             }
             Err(err) => {
-                log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-                if count >= lenth {
-                    return Err(err);
+                log::error!("Failed to connect to upstream {}: {}", &upstream_ip, err);
+                let mut active_upstream_writer = state.active_upstream.write().await;
+                active_upstream_writer.swap_remove(idx);
+                if active_upstream_writer.len() == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "Failed to connect to any upstream",
+                    ));
                 }
+                drop(active_upstream_writer);
             }
         }
-        count += 1;
     }
 }
 
