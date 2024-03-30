@@ -1,6 +1,7 @@
 mod request;
 mod response;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use rand::{Rng, SeedableRng};
 use tokio::time::sleep;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -30,6 +32,9 @@ struct CmdOptions {
     /// "Maximum number of requests to accept per IP per minute (0 = unlimited)"
     #[arg(long, default_value = "0")]
     max_requests_per_minute: usize,
+    /// Fixed Window to limit rate per second
+    #[arg(short, default_value = "60")]
+    time_reset:usize,
 }
 
 /// Contains information about the state of balancebeam (e.g. what servers we are currently proxying
@@ -50,7 +55,11 @@ struct ProxyState {
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
     /// Active upstream that can be connected
-    active_upstream:Arc<RwLock<Vec<String>>>
+    active_upstream:Arc<RwLock<Vec<String>>>,
+    /// Count the IP send times for Rate limiting
+    ip_count:Arc<Mutex<HashMap<String,usize>>>,
+    /// time to reset ip count,
+    time_reset:usize,
 }
 
 #[tokio::main]
@@ -86,12 +95,19 @@ async fn main() {
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
-        active_upstream:Arc::new(RwLock::new(options.upstream.clone())),
+        active_upstream: Arc::new(RwLock::new(options.upstream.clone())),
+        ip_count: Arc::new(Mutex::new(HashMap::new())),
+        time_reset: options.time_reset,
     };
 
     let state_healthcheck = state.clone();
     tokio::spawn(async move {
         active_health_check(&state_healthcheck).await;
+    });
+
+    let ip_count = state.clone();
+    tokio::spawn(async move {
+        count_reset(&ip_count).await;
     });
 
     while let Ok((stream,_)) = listener.accept().await {
@@ -100,6 +116,14 @@ async fn main() {
         tokio::spawn(async move {
             handle_connection(stream, &spawn_state).await;
         });
+    }
+}
+
+async fn count_reset(state: &ProxyState) {
+    loop {
+        sleep(Duration::from_secs(state.time_reset.try_into().unwrap())).await;
+        let mut ip_count = state.ip_count.lock().await;
+        ip_count.clear();
     }
 }
 
@@ -146,9 +170,29 @@ async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Ve
     }
 }
 
+async fn update_ip_info(ip: &str, state: &ProxyState) {
+    let mut ip_counter = state.ip_count.clone().lock_owned().await;
+    if state.max_requests_per_minute == 0 {
+        return;
+    }
+    let cnt = ip_counter.entry(ip.to_string()).or_insert(0);
+    *cnt += 1;
+}
+
+async fn check_ip_rate_limit(ip: &String, state: &ProxyState) -> bool {
+    let ip_info = state.ip_count.clone().lock_owned().await;
+    if ip_info.get(ip).is_none() || state.max_requests_per_minute == 0{
+        return false;
+    }
+    *ip_info.get(ip).unwrap() > state.max_requests_per_minute
+}
+
+
 async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
+
+
 
     // Open a connection to a random destination server
     let mut upstream_conn = match connect_to_upstream(state).await {
@@ -197,6 +241,17 @@ async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
             upstream_ip,
             request::format_request_line(&request)
         );
+
+        // update ip request times
+        update_ip_info(&client_ip, state).await;
+
+        // check if ip request times is illgeal
+        if check_ip_rate_limit(&client_ip,state).await {
+            log::warn!("{} too many requests in {} second",client_ip,state.time_reset);
+            let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+            send_response(&mut client_conn, &response).await;
+            return;
+        }
 
         // Add X-Forwarded-For header so that the upstream server knows the client's IP address.
         // (We're the ones connecting directly to the upstream server, so without this header, the
@@ -272,12 +327,6 @@ async fn active_health_check(state: &ProxyState){
                     };
                     match response.status().as_u16(){
                         200 => {
-                            // add_active_stream(&upstream_ip, state).await;
-                            // let active_stream_reader = state.active_upstream.read().await;
-                            // if active_stream_reader.contains(&upstream_ip){
-                            //     return;
-                            // }
-                            // drop(active_stream_reader);
                             active_upstream_writer.push(upstream_ip.clone());
                         }
                         status @ _ => {
@@ -295,31 +344,6 @@ async fn active_health_check(state: &ProxyState){
                     return;
                 }
             }
-
         }
-        
     }
 }
-
-// async fn delete_unactive_stream(stream_ip: &String,state: &ProxyState) {
-//     // check if this stream is in active stream
-//     let active_stream_reader = state.active_upstream.read().await;
-//     if !active_stream_reader.contains(&stream_ip){
-//         return;
-//     }
-
-//     let mut active_stream_writer = state.active_upstream.write().await;
-//     let idx = active_stream_writer.iter().position(|x| x == stream_ip).unwrap();
-//     active_stream_writer.swap_remove(idx);
-// }
-
-// async fn add_active_stream(stream_ip: &String,state: &ProxyState) {
-//     //first check if this stream is already in active stream
-//     let active_stream_reader = state.active_upstream.read().await;
-//     if active_stream_reader.contains(&stream_ip){
-//         return;
-//     }
-//     drop(active_stream_reader);
-//     let mut active_stream_writer = state.active_upstream.write().await;
-//     active_stream_writer.push(stream_ip.clone());
-// }
